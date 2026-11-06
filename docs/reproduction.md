@@ -212,4 +212,6 @@ python3 tools/wormhole_parse.py captures/wormhole_bus3_synth_*.pcap --hid
 #   name=WORMHOLE VENDOR HID (0xD9), hid_type=mouse, footer_ok=True
 ```
 
+For a logged, four-phase version of the peer-to-local test (sg_raw and a direct SG_IO call, plus a 15-byte control), see `tools/peer_rerun_send.py`. It needs write access to the `/dev/sgN` node. Results: `docs/live-capture-2026-11-06.md`, re-run section.
+
 Record what you see when you do this — the peer-to-peer data channel is internal, so local capture can only show its HID/SCSI *effects*.
