@@ -50,11 +50,13 @@ See [`docs/capture-log.md`](docs/capture-log.md) for a sample usbmon capture and
 │   ├── methodology.md            # REA device-protocol workflow used
 │   └── reproduction.md           # commands to re-dump this device yourself
 ├── captures/
-│   ├── wormhole_bus3_2026-11-06.pcap
-│   └── wormhole_bus3_capinfos.txt
+│   ├── wormhole_bus3_2026-11-06.pcap          # idle baseline (no session)
+│   ├── wormhole_bus3_capinfos.txt
+│   ├── wormhole_bus3_synth_2026-11-06.pcap    # sg_raw 0xD9 injection (vendor HID verified)
+│   └── wormhole_bus3_synth_capinfos.txt
 └── tools/
-    ├── wormhole_parse.py         # stdlib-only usbmon pcap parser (CBW/CSW/SCSI)
-    └── test_wormhole_parse.py    # unittest suite for the parser
+    ├── wormhole_parse.py         # stdlib-only usbmon pcap parser (CBW/CSW/SCSI + vendor 0xD9 HID + boot HID reports)
+    └── test_wormhole_parse.py    # unittest suite for the parser (42 tests)
 ```
 
 ## Reproduce the basics
@@ -76,13 +78,23 @@ See `docs/reproduction.md` for endpoints, `/sys` paths, and REA commands.
 `tools/wormhole_parse.py` is stdlib-only (no tshark/pyshark/scapy) and
 reproduces the counts in `docs/capture-log.md` from the committed pcap.
 It discovers the Wormhole by VID:PID during control enumeration, so it
-does not depend on a Bus:Device number from a previous plug:
+does not depend on a Bus:Device number from a previous plug.  It also
+decodes the Wormhole vendor HID protocol (16-byte `0xD9` CDB,
+`D9 '3'/'4'/'6' <12 payload> O T` — see `docs/transport.md`) and boot
+HID interrupt reports (EP3 mouse, EP4 keyboard), and flags any other
+vendor-range CDB as a candidate UPipe packet so a live peer-active
+capture is parseable immediately:
 
 ```sh
 python3 tools/wormhole_parse.py captures/wormhole_bus3_2026-11-06.pcap
 python3 tools/wormhole_parse.py captures/wormhole_bus3_2026-11-06.pcap --json
+python3 tools/wormhole_parse.py live.pcap --hid   # peer-active capture
 python3 -m unittest tools.test_wormhole_parse
 ```
+
+For the live peer-active capture runbook (idle baseline, GoBridge
+session, and a single-host `sg_raw` vendor-CDB injection test), see
+`docs/reproduction.md` §6.
 
 ## Tooling notes (this host)
 
