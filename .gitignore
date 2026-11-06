@@ -34,6 +34,10 @@ link/
 *.swp
 *~
 
+# Python
+__pycache__/
+*.py[cod]
+
 # Keep the one sanitized capture in this repo
 !captures/*.pcap
 !captures/*.txt

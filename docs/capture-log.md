@@ -69,12 +69,12 @@ Mixed Bus 3 traffic (Wormhole 3:15 + IronKey 3:14 + others). Wormhole-only tags 
 0x03 REQUEST SENSE: 44
 0x12 INQUIRY: 2
 0x25 READ CAPACITY(10): 1
-0x43 READ(10) family / other: 2
-0x46 READ(10) family / other: 1
+0x43 READ TOC/PMA/ATIP: 2
+0x46 GET CONFIGURATION: 1
 0x4A LOG SENSE: 30
 ```
 
-Wormhole-specific in this window: LOG SENSE + REQUEST SENSE loop, plus the single INQUIRY + READ CAPACITY(10) pair driven by `sg_inq`/`sg_readcap` + `dd` at 10:58:44-46. IronKey LUN 1 tags (8386+) contribute the `0x00`/`0x43`/`0x46` bulk pairs from the S200's own polling.
+Wormhole-specific in this window (`tools/wormhole_parse.py`): LOG SENSE (16) + REQUEST SENSE (16) loop, plus the single INQUIRY (2, standard + EVPD) + READ CAPACITY(10) (1) pair driven by `sg_inq`/`sg_readcap` + `dd` at 10:58:44-46, TEST UNIT READY (4), and the kernel's CD-ROM probes READ TOC/PMA/ATIP (2, `43 00…` / `43 02…`) and GET CONFIGURATION (1, `46 00…`) at frames 1385-1402. IronKey 3:14 accounts for the remaining TEST UNIT READY (14), REQUEST SENSE (28) and LOG SENSE (14); it issues no `0x43`/`0x46` in this window.
 
 READ CAPACITY(16) (`0x9E`) failed live (`sg_readcap --16` → Invalid opcode) — not emitted by the kernel in this window because the kernel already cached the 15.5 MiB size from an earlier probe. The live `sg_raw` READ CAPACITY(10) response (`00 00 06 38 00 00 08 00`) matches `sg_readcap`.
 
@@ -91,5 +91,24 @@ capability_unavailable: tshark was not found in an absolute PATH entry
 ```
 
 `capinfos` is present (Wireshark 4.4.19), `tshark` is not. Capture was analyzed with `tcpdump -v -X`, `capinfos`, and a Python pcap parser above. Installing `wireshark-common` (provides `tshark`) would unblock the REA pcap path.
+
+## Parser verification
+
+`tools/wormhole_parse.py` (stdlib only) reproduces every count above
+from `captures/wormhole_bus3_2026-11-06.pcap`:
+
+```sh
+python3 tools/wormhole_parse.py captures/wormhole_bus3_2026-11-06.pcap
+python3 -m unittest tools.test_wormhole_parse
+```
+
+It discovers the Wormhole by VID:PID (`0711:2211`) from control
+enumeration rather than a hard-coded Bus:Device, pairs CBW → data →
+CSW per device (42 Wormhole transactions: LOG SENSE 16, REQUEST SENSE
+16, TEST UNIT READY 4, INQUIRY 2, READ CAPACITY(10) 1, READ
+TOC/PMA/ATIP 2, GET CONFIGURATION 1), and confirms 0 interrupt
+packets for 3:15 (all 1682 interrupt packets are Logitech 3:7).
+Note the on-disk pcap linktype is 220; Wireshark displays the same
+encapsulation as 115 (usb-linux-mmap).
 
 File retained in this repo under `captures/` (195 kB, under GitHub's 100 MB limit).
