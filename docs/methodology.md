@@ -23,9 +23,9 @@ Followed `reverse-engineer-anything` v49 → `references/device-protocol-analysi
 
 | Desired | Status | Remediation |
 |---------|--------|-------------|
-| Deep disassembly (`binary_overview`, `list_procedures`, `analyze_function`) | Blocked — Ghidra 12.2 (`/opt/ghidra_12.2_PUBLIC`) vs REA requires 12.1.x verified 12.1.4 (`unsupported_version`) | Install Ghidra 12.1.4 or update REA for 12.2 line |
-| `tshark` REA pcap (`inspect_pcap_capture`, `inspect_packet_capture`) | Blocked — `tshark` binary not on PATH (GUI 4.4.19 + `capinfos` only) | `sudo apt install wireshark-common` or set `REA_TSHARK_COMMAND` to a tshark 4.x absolute path |
-| UPX decompression | Not attempted — `upx` not installed | `sudo apt install upx-u` then `upx -d` on the carved DLL (in a VM) and re-run REA imports |
+| Deep disassembly (`binary_overview`, `list_procedures`, `analyze_function`) | **Done (2026-11-06)** — Ghidra 12.1.4 side-by-side at `/opt/ghidra_12.1.4_PUBLIC`, `/usr/local/bin/ghidra` repointed; SKLoader 988, unpacked DLL 1,849, GoBridgeDemon 1,204 functions. See `docs/pe-analysis.md` *Tooling*. | — |
+| `tshark` REA pcap (`inspect_pcap_capture`, `inspect_packet_capture`) | **Done** — `tshark`/`capinfos` 4.4.19 at `/usr/bin/`; `inspect_pcap_client` passes | — |
+| UPX decompression | **Done** — `upx` 4.2.4, `upx -d` 104,488 → 310,312 B; real imports (380) + exports (12) recovered | — |
 | `inspect_macho` | Unavailable on Linux (macOS-only) | Use `open_binary` (Ghidra) or macOS host |
 | Live peer traffic | Not captured — second machine connected but no Wormhole session driven | Run GoBridge on both ends, move mouse/files, re-capture `usbmon3` |
 
@@ -38,6 +38,6 @@ Followed `reverse-engineer-anything` v49 → `references/device-protocol-analysi
 ## What remains unknown
 
 - `GSDD.zz` / `GSDD.lst` container format (encryption/compression) and their role in SKLoader deployment.
-- Embedded DLL's true imports/exports and protocol role (UPX-packed).
 - Bridge peer-to-peer data channel between the two cable ends (internal to the microcontroller, not enumerated from one host).
 - Why kernel block size (15.5 MiB) disagrees with `READ CAPACITY(10)` (3.1 MiB) — requires pre-plug kernel log or firmware dump to resolve.
+- GoBridgeDemon function-level behavior beyond string inventory (1,204 functions decompile now; no function has been pseudocoded yet).
