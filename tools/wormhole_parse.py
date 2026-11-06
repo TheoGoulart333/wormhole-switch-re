@@ -15,6 +15,17 @@ What it does
 * Pairs SCSI Bulk-Only CBW -> data -> CSW transactions per device and
   decodes the CDB, the data phase (INQUIRY / READ CAPACITY(10) /
   REQUEST SENSE / READ TOC / GET CONFIGURATION) and the CSW status.
+* Decodes the Wormhole vendor HID protocol: a 16-byte CDB whose
+  opcode is 0xD9, byte 1 is '3' (mouse) / '4' (keyboard) / '6'
+  (multimedia), bytes 2-13 are a 12-byte HID payload, and bytes 14-15
+  are 'O' 'T' (OTiTransfer::sendHIDPacket -- see docs/transport.md and
+  docs/mac-gobridge.md).  Any other CDB in the SPC vendor range is also
+  flagged as a potential UPipe / file-transfer packet and reported with
+  raw hex so a live capture can characterise it.
+* Decodes boot HID interrupt reports: EP3 mouse (4 bytes: buttons,
+  signed X/Y/Wheel) and EP4 keyboard (8 bytes: modifiers + 6 keys).
+  This is how a peer-active session differs from the idle capture
+  (which has zero Wormhole interrupt traffic).
 * Summarises control / bulk / interrupt traffic per device, which is
   how "the Wormhole HID interfaces are idle" can be verified.
 
@@ -63,6 +74,7 @@ Usage
     python3 tools/wormhole_parse.py captures/wormhole_bus3_2026-11-06.pcap --json
     python3 tools/wormhole_parse.py captures/wormhole_bus3_2026-11-06.pcap --device 14
     python3 tools/wormhole_parse.py captures/wormhole_bus3_2026-11-06.pcap --all --no-transactions
+    python3 tools/wormhole_parse.py live.pcap --hid   # focus HID + vendor sections
 
 Exit codes: 0 success, 1 usage/IO error, 2 unsupported file format.
 """
@@ -109,6 +121,7 @@ SCSI_OPCODES = {
     0x9E: "READ CAPACITY(16)",
     0xA0: "RECEIVE DIAGNOSTIC",
     0xA3: "REPORT LUNs",
+    0xD9: "WORMHOLE VENDOR HID (0xD9)",
 }
 SENSE_KEYS = {
     0: "No Sense", 1: "Recovered Error", 2: "Not Ready", 3: "Medium Error",
@@ -125,6 +138,28 @@ ASC_NAMES = {
     0x0400: "Not ready",
     0x3A00: "Medium not present",
 }
+
+# --- Wormhole vendor HID protocol (OTiTransfer) --------------------------
+# OTiTransporter::sendHIDPacket builds a 16-byte buffer that *is* the
+# SCSI CDB.  See docs/mac-gobridge.md for the decompiler trail.
+VENDOR_HID_MAGIC = 0xD9               # CDB byte 0
+VENDOR_HID_TYPES = {
+    0x33: "mouse",                   # '3', type 1
+    0x34: "keyboard",                # '4', type 2
+    0x36: "multimedia",              # '6', type 3
+}
+VENDOR_HID_FOOTER = b"OT"             # CDB bytes 14-15
+VENDOR_HID_LEN = 16
+VENDOR_RANGE = (0xC0, 0xFF)           # SPC vendor-specific opcodes
+
+# HID report identification (from the config descriptor in the capture:
+# If 1 = boot mouse EP3 IN, If 2 = boot keyboard EP4 IN)
+WORMHOLE_MOUSE_EP = 3
+WORMHOLE_KEYBOARD_EP = 4
+HID_MODIFIERS = [
+    "LCtrl", "LShift", "LAlt", "LWin",
+    "RCtrl", "RShift", "RAlt", "RWin",
+]
 
 
 # --------------------------------------------------------------------------
@@ -378,6 +413,14 @@ class Transaction:
     def opcode_name(self) -> str:
         return SCSI_OPCODES.get(self.opcode, "UNKNOWN 0x%02X" % self.opcode)
 
+    @property
+    def is_vendor(self) -> bool:
+        return bool(self.cbw.cdb) and VENDOR_RANGE[0] <= self.cbw.cdb[0] <= VENDOR_RANGE[1]
+
+    @property
+    def is_vendor_hid(self) -> bool:
+        return bool(self.cbw.cdb) and self.cbw.cdb[0] == VENDOR_HID_MAGIC
+
 
 def parse_cbw(payload: bytes) -> CbW | None:
     if len(payload) < 31 or payload[:4] != b"USBC":
@@ -441,11 +484,89 @@ def parse_transactions(packets: list[UrbPacket]) -> list[Transaction]:
     return txns
 
 
+def decode_vendor_cdb(cdb: bytes) -> dict:
+    """Decode a Wormhole vendor HID CDB (opcode 0xD9) or generic vendor CDB.
+
+    Returns a dict describing the packet; returns {} for non-vendor
+    opcodes so callers can branch.  The 0xD9 layout is from
+    OTiTransporter::sendHIDPacket (see module docstring): a 16-byte
+    buffer that is both the CDB and the packet.
+    """
+    if not cdb:
+        return {}
+    op = cdb[0]
+    if not (VENDOR_RANGE[0] <= op <= VENDOR_RANGE[1]):
+        return {}
+    out: dict = {
+        "is_vendor": True,
+        "opcode": "0x%02X" % op,
+        "cdb_hex": cdb.hex(),
+        "cdb_len": len(cdb),
+    }
+    if op == VENDOR_HID_MAGIC:
+        out["is_vendor_hid"] = True
+        out["name"] = "WORMHOLE VENDOR HID (0xD9)"
+        # byte 1: type char
+        if len(cdb) >= 2:
+            type_byte = cdb[1]
+            out["type_byte"] = "0x%02X" % type_byte
+            try:
+                out["type_char"] = chr(type_byte)
+            except ValueError:
+                out["type_char"] = "?"
+            out["hid_type"] = VENDOR_HID_TYPES.get(type_byte, "unknown")
+        # bytes 2-13: 12-byte HID payload
+        if len(cdb) >= 14:
+            payload = cdb[2:14]
+            out["payload_hex"] = payload.hex()
+            out["payload"] = list(payload)
+            out["payload_len"] = len(payload)
+        # bytes 14-15: 'O' 'T' footer
+        if len(cdb) >= 16:
+            footer = cdb[14:16]
+            out["footer_hex"] = footer.hex()
+            out["footer_ascii"] = _ascii(footer)
+            out["footer_ok"] = footer == VENDOR_HID_FOOTER
+        out["valid_hid_framing"] = bool(
+            len(cdb) == VENDOR_HID_LEN
+            and (len(cdb) < 2 or cdb[1] in VENDOR_HID_TYPES)
+            and (len(cdb) < 16 or cdb[14:16] == VENDOR_HID_FOOTER)
+        )
+        # Any trailing bytes beyond the 16-byte HID packet are
+        # reported verbatim (possible UPipe/data-phase spill).
+        if len(cdb) > VENDOR_HID_LEN:
+            out["trailing_hex"] = cdb[VENDOR_HID_LEN:].hex()
+    else:
+        out["is_vendor_hid"] = False
+        # Generic vendor CDB: likely a file/clipboard UPipe packet.
+        # Magic is unknown; report raw bytes so a live capture can
+        # characterise it.
+        out["name"] = "VENDOR CDB 0x%02X (possible UPipe)" % op
+        out["candidate_upipe"] = True
+    return out
+
+
+def build_vendor_hid_cdb(hid_type: str, payload: bytes) -> bytes:
+    """Build a 16-byte 0xD9 CDB for tests / sg_raw injection.
+
+    hid_type: '3' (mouse), '4' (keyboard) or '6' (multimedia).
+    payload: 0-12 bytes, zero-padded to 12.
+    """
+    if hid_type not in ("3", "4", "6"):
+        raise ValueError("hid_type must be '3', '4' or '6'")
+    payload = (payload + b"\x00" * 12)[:12]
+    return bytes([VENDOR_HID_MAGIC, ord(hid_type)]) + payload + VENDOR_HID_FOOTER
+
+
 def decode_cdb(cdb: bytes) -> dict:
     """Decode common CDB fields per opcode. Unknown fields stay raw."""
     if not cdb:
         return {}
     op = cdb[0]
+    # Vendor opcodes (including the 0xD9 HID packet) first -- they are
+    # not SPC opcodes and must not fall through to the standard decoder.
+    if VENDOR_RANGE[0] <= op <= VENDOR_RANGE[1]:
+        return decode_vendor_cdb(cdb)
     out: dict = {"opcode": "0x%02X" % op,
                  "name": SCSI_OPCODES.get(op, "UNKNOWN 0x%02X" % op),
                  "cdb_hex": cdb.hex()}
@@ -476,6 +597,89 @@ def decode_cdb(cdb: bytes) -> dict:
     return out
 
 
+def _signed8(v: int) -> int:
+    return v - 256 if v >= 128 else v
+
+
+def decode_hid_mouse_report(payload: bytes) -> dict:
+    """Decode a boot-mouse report (EP3, 4 bytes per report descriptor)."""
+    if len(payload) < 4:
+        return {"len": len(payload), "hex": payload.hex(), "decoded": False,
+                "error": "short mouse report (need >= 4 bytes)"}
+    buttons = payload[0]
+    return {
+        "len": len(payload),
+        "hex": payload.hex(),
+        "decoded": True,
+        "kind": "mouse",
+        "buttons": buttons,
+        "left": bool(buttons & 0x01),
+        "right": bool(buttons & 0x02),
+        "middle": bool(buttons & 0x04),
+        "reserved_bits": buttons & ~0x07,
+        "x": _signed8(payload[1]),
+        "y": _signed8(payload[2]),
+        "wheel": _signed8(payload[3]),
+    }
+
+
+def decode_hid_keyboard_report(payload: bytes) -> dict:
+    """Decode a boot-keyboard report (EP4, 8 bytes per report descriptor)."""
+    if len(payload) < 8:
+        return {"len": len(payload), "hex": payload.hex(), "decoded": False,
+                "error": "short keyboard report (need >= 8 bytes)"}
+    mods = payload[0]
+    keys = [b for b in payload[2:8] if b != 0]
+    return {
+        "len": len(payload),
+        "hex": payload.hex(),
+        "decoded": True,
+        "kind": "keyboard",
+        "modifiers": mods,
+        "modifier_names": [HID_MODIFIERS[i] for i in range(8) if mods & (1 << i)],
+        "constant": payload[1],
+        "keys": keys,
+        "key_hex": [hex(k) for k in keys],
+        "idle": len(keys) == 0 and mods == 0,
+    }
+
+
+def decode_hid_report(ep_num: int, payload: bytes) -> dict:
+    """Dispatch to mouse/keyboard decoding by endpoint number."""
+    if ep_num == WORMHOLE_MOUSE_EP:
+        return decode_hid_mouse_report(payload)
+    if ep_num == WORMHOLE_KEYBOARD_EP:
+        return decode_hid_keyboard_report(payload)
+    return {"len": len(payload), "hex": payload.hex(), "decoded": False,
+            "error": "unknown HID endpoint 0x%x" % ep_num}
+
+
+def parse_hid_reports(packets: list[UrbPacket]) -> list[dict]:
+    """Collect decoded HID interrupt IN reports from usbmon packets.
+
+    Only COMPLETE interrupt transfers with a payload count as a report;
+    SUBMIT packets are the host polling.  This mirrors the transaction
+    logic for bulk (which keys on SUBMIT CBWs) -- for HID the data is
+    only in COMPLETEs.
+    """
+    reports: list[dict] = []
+    for p in packets:
+        if p.xfer != 1 or p.kind != "C" or not p.payload:
+            continue
+        if p.direction != "IN":
+            continue
+        decoded = decode_hid_report(p.ep_num, p.payload)
+        reports.append({
+            "bus": p.bus, "dev": p.dev, "frame": p.frame, "ts": p.ts,
+            "endpoint": "0x%02x" % p.endpoint,
+            "ep_num": p.ep_num,
+            "data_len": len(p.payload),
+            **decoded,
+        })
+    reports.sort(key=lambda r: (r["bus"], r["dev"], r["frame"]))
+    return reports
+
+
 def _ascii(b: bytes) -> str:
     return "".join(chr(c) if 32 <= c < 127 else "." for c in b)
 
@@ -487,6 +691,16 @@ def decode_data(txn: Transaction) -> dict:
         return {}
     op = txn.opcode
     out: dict = {"len": len(data), "hex": data.hex(), "ascii": _ascii(data)}
+    # Vendor HID packets have no data phase in the observed path
+    # (SendSCSICommandSendData with CFData NULL), but if one appears
+    # (e.g. a UPipe packet) keep it raw and flagged.
+    if VENDOR_RANGE[0] <= op <= VENDOR_RANGE[1]:
+        out["vendor_data"] = True
+        if op == VENDOR_HID_MAGIC:
+            out["note"] = "unexpected data phase on 0xD9 HID packet"
+        else:
+            out["note"] = "possible UPipe / file-transfer payload -- magic unknown"
+        return out
     if op == 0x12 and len(data) >= 36:                    # INQUIRY (standard)
         out.update({
             "pdt": data[0] & 0x1F,
@@ -524,7 +738,7 @@ def decode_data(txn: Transaction) -> dict:
 def transaction_to_dict(txn: Transaction, first_ts: float) -> dict:
     csw = txn.csw
     status = csw.status if csw else None
-    return {
+    d: dict = {
         "bus": txn.bus, "dev": txn.dev,
         "cbw_frame": txn.cbw.frame,
         "t_offset_s": round(txn.cbw.ts - first_ts, 6) if first_ts else None,
@@ -539,6 +753,12 @@ def transaction_to_dict(txn: Transaction, first_ts: float) -> dict:
         "csw_status_name": CSW_STATUS_NAMES.get(status, "unknown") if status is not None else None,
         "csw_residue": csw.residue if csw else None,
     }
+    # Compact vendor markers for histogram consumers.
+    if d.get("is_vendor_hid"):
+        d["vendor_hid_type"] = d.get("hid_type")
+    if d.get("candidate_upipe"):
+        d["candidate_upipe"] = True
+    return d
 
 
 # --------------------------------------------------------------------------
@@ -548,6 +768,7 @@ def transaction_to_dict(txn: Transaction, first_ts: float) -> dict:
 def summarise(pcap: PcapData) -> dict:
     devices = discover_devices(pcap.packets)
     txns = parse_transactions(pcap.packets)
+    hid_reports = parse_hid_reports(pcap.packets)
     per_device: dict[str, dict] = {}
     for key, info in sorted(devices.items()):
         bus, dev = key
@@ -560,6 +781,12 @@ def summarise(pcap: PcapData) -> dict:
         csw_hist = collections.Counter(
             CSW_STATUS_NAMES.get(t.csw.status, "unknown")
             for t in dev_txns if t.csw is not None)
+        vendor_hid = [t for t in dev_txns if t.is_vendor_hid]
+        vendor_all = [t for t in dev_txns if t.is_vendor]
+        hid_hist = collections.Counter(
+            r.get("kind", "unknown") for r in hid_reports
+            if r["bus"] == bus and r["dev"] == dev)
+        dev_hid = [r for r in hid_reports if r["bus"] == bus and r["dev"] == dev]
         per_device["%d:%d" % (bus, dev)] = {
             "vid": ("0x%04x" % info.vid) if info.vid is not None else None,
             "pid": ("0x%04x" % info.pid) if info.pid is not None else None,
@@ -571,6 +798,16 @@ def summarise(pcap: PcapData) -> dict:
             "scsi_transactions": len(dev_txns),
             "opcode_histogram": dict(opcode_hist),
             "csw_status_histogram": dict(csw_hist),
+            "vendor_hid_packets": len(vendor_hid),
+            "vendor_hid_types": dict(collections.Counter(
+                decode_vendor_cdb(t.cbw.cdb).get("hid_type", "unknown")
+                for t in vendor_hid)),
+            "vendor_cdb_packets": len(vendor_all),
+            "candidate_upipe_packets": sum(
+                1 for t in vendor_all if not t.is_vendor_hid),
+            "hid_reports": len(dev_hid),
+            "hid_kind_histogram": dict(hid_hist),
+            "hid_samples": dev_hid[:5],
         }
     wormholes = [k for k, v in per_device.items() if v["is_wormhole"]]
     return {
@@ -579,6 +816,12 @@ def summarise(pcap: PcapData) -> dict:
         "first_ts": pcap.first_ts,
         "devices": per_device,
         "wormhole_devices": wormholes,
+        "total_vendor_hid_packets": sum(
+            d["vendor_hid_packets"] for d in per_device.values()),
+        "total_candidate_upipe_packets": sum(
+            d["candidate_upipe_packets"] for d in per_device.values()),
+        "total_hid_reports": len(hid_reports),
+        "hid_reports": hid_reports,
     }
 
 
@@ -587,14 +830,17 @@ def summarise(pcap: PcapData) -> dict:
 # --------------------------------------------------------------------------
 
 def _fmt_device_table(summary: dict) -> list[str]:
-    lines = ["Devices (Bus:Dev  VID:PID  packets  control/bulk/interrupt  SCSI txns)"]
+    lines = ["Devices (Bus:Dev  VID:PID  packets  control/bulk/interrupt  SCSI txns  vendorHID  HID)"]
     for key, d in sorted(summary["devices"].items()):
         vidpid = "%s:%s" % (d["vid"], d["pid"]) if d["vid"] else "unknown"
         mark = "  <-- WormholeSwitch" if d["is_wormhole"] else ""
-        lines.append("  %s  %s  %d  %s  %d%s" % (
+        lines.append("  %s  %s  %d  %s  %d  %d  %d%s" % (
             key, vidpid, d["packets"],
             "/".join(str(d["by_xfer"].get(k, 0)) for k in ("control", "bulk", "interrupt")),
-            d["scsi_transactions"], mark))
+            d["scsi_transactions"],
+            d.get("vendor_hid_packets", 0),
+            d.get("hid_reports", 0),
+            mark))
     return lines
 
 
@@ -612,7 +858,17 @@ def _fmt_interfaces(interfaces: list[dict]) -> list[str]:
 def _fmt_txn(t: dict) -> str:
     data = t.get("data") or {}
     extra = ""
-    if "vendor" in data:
+    if t.get("is_vendor_hid"):
+        extra = " vendorHID type=%s payload=%s footer_ok=%s framing=%s" % (
+            t.get("hid_type", "?"), t.get("payload_hex", "")[:24],
+            t.get("footer_ok"), t.get("valid_hid_framing"))
+        if data.get("len"):
+            extra += " data[%d]=%s" % (data["len"], data["hex"][:48])
+    elif t.get("candidate_upipe"):
+        extra = " candidateUPipe CDB=%s dataLen=%d %s" % (
+            t.get("cdb_hex", "")[:32], t.get("cbw_data_len", 0),
+            ("data[%d]=%s" % (data["len"], data["hex"][:48])) if data.get("len") else "")
+    elif "vendor" in data:
         extra = " %r/%r rev %r PDT=%d" % (data["vendor"], data["product"],
                                           data["revision"], data["pdt"])
     elif "last_lba" in data:
@@ -630,6 +886,27 @@ def _fmt_txn(t: dict) -> str:
         t["csw_status_name"], extra)
 
 
+def _fmt_hid_section(hid_reports: list[dict], limit: int = 20) -> list[str]:
+    if not hid_reports:
+        return ["  (no HID interrupt reports -- interfaces idle)"]
+    lines = ["  %d HID report(s) total, showing up to %d:" % (len(hid_reports), min(limit, len(hid_reports)))]
+    for r in hid_reports[:limit]:
+        if r.get("kind") == "mouse":
+            lines.append("    f%-5d %d:%d EP%d mouse buttons=0x%02x L=%s R=%s M=%s x=%+d y=%+d wheel=%+d" % (
+                r["frame"], r["bus"], r["dev"], r["ep_num"],
+                r.get("buttons", 0), r.get("left"), r.get("right"), r.get("middle"),
+                r.get("x", 0), r.get("y", 0), r.get("wheel", 0)))
+        elif r.get("kind") == "keyboard":
+            mods = ",".join(r.get("modifier_names", [])) or "(none)"
+            keys = ",".join(r.get("key_hex", [])) or "(none)"
+            lines.append("    f%-5d %d:%d EP%d keyboard mods=[%s] keys=[%s] idle=%s" % (
+                r["frame"], r["bus"], r["dev"], r["ep_num"], mods, keys, r.get("idle")))
+        else:
+            lines.append("    f%-5d %d:%d EP%d %s" % (
+                r["frame"], r["bus"], r["dev"], r["ep_num"], r.get("error", "unknown")))
+    return lines
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     ap.add_argument("pcap", help="usbmon pcap (linktype 220)")
@@ -640,6 +917,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="show transactions for every device, not just Wormhole")
     ap.add_argument("--no-transactions", action="store_true",
                     help="summary only, no per-transaction list")
+    ap.add_argument("--hid", action="store_true",
+                    help="emphasise HID + vendor sections (verbose HID list)")
     ap.add_argument("--json", action="store_true", help="emit JSON")
     args = ap.parse_args(argv)
 
@@ -681,6 +960,10 @@ def main(argv: list[str] | None = None) -> int:
     print("SHA-256: %s" % summary["sha256"])
     print("Packets: %d  duration: %.3fs  linktype: %d (usb-linux-mmap)" % (
         summary["packets"], summary["duration_s"], summary["linktype"]))
+    print("Vendor HID (0xD9) packets: %d  candidate UPipe: %d  HID reports: %d" % (
+        summary.get("total_vendor_hid_packets", 0),
+        summary.get("total_candidate_upipe_packets", 0),
+        summary.get("total_hid_reports", 0)))
     print()
     print("\n".join(_fmt_device_table(summary)))
 
@@ -697,6 +980,12 @@ def main(argv: list[str] | None = None) -> int:
         print("\nSCSI Bulk-Only transactions (%d):" % len(txn_dicts))
         for t in txn_dicts:
             print(_fmt_txn(t))
+
+    # HID detail for focused devices.
+    hid = [r for r in summary.get("hid_reports", [])
+           if want is None or (r["bus"], r["dev"]) in want]
+    print("\nHID interrupt reports (%d in focus):" % len(hid))
+    print("\n".join(_fmt_hid_section(hid, limit=50 if args.hid else 20)))
     return 0
 
 

@@ -175,8 +175,11 @@ class TestUnitDecoders(unittest.TestCase):
         self.assertEqual(out["alloc_len"], 8)
 
     def test_decode_cdb_unknown_opcode(self):
-        out = wp.decode_cdb(bytes([0xFF, 0, 0, 0, 0, 0]))
-        self.assertEqual(out["name"], "UNKNOWN 0xFF")
+        # 0x0B is an obsolete SEEK opcode not in SCSI_OPCODES and
+        # outside the 0xC0-0xFF vendor range, so it stays UNKNOWN.
+        # (0xFF is in the vendor range and is now decoded as vendor.)
+        out = wp.decode_cdb(bytes([0x0B, 0, 0, 0, 0, 0]))
+        self.assertEqual(out["name"], "UNKNOWN 0x0B")
 
     def test_parse_device_descriptor(self):
         payload = bytes.fromhex("120100020000004011071122000101020301")
@@ -207,6 +210,222 @@ class TestUnitDecoders(unittest.TestCase):
     def test_read_pcap_missing_file(self):
         with self.assertRaises(OSError):
             wp.read_pcap(REPO / "captures" / "does-not-exist.pcap")
+
+
+class TestSyntheticCapture(unittest.TestCase):
+    SYNTH = REPO / "captures" / "wormhole_bus3_synth_2026-11-06.pcap"
+
+    def test_synthetic_capture_vendor_hid(self):
+        pcap = wp.read_pcap(self.SYNTH)
+        summary = wp.summarise(pcap)
+        self.assertEqual(summary["total_vendor_hid_packets"], 1)
+        self.assertEqual(summary["wormhole_devices"], ["3:15"])
+        info = summary["devices"]["3:15"]
+        self.assertEqual(info["vendor_hid_packets"], 1)
+        self.assertEqual(info["vendor_hid_types"], {"mouse": 1})
+        # The synthetic packet must decode as mouse / OT footer / valid framing.
+        txns = wp.parse_transactions(pcap.packets)
+        vendor = [t for t in txns if t.is_vendor_hid]
+        self.assertEqual(len(vendor), 1)
+        d = wp.transaction_to_dict(vendor[0], pcap.first_ts or 0.0)
+        self.assertEqual(d["cdb_hex"], "d933010a000000000000000000004f54")
+        self.assertEqual(d["hid_type"], "mouse")
+        self.assertTrue(d["footer_ok"])
+        self.assertTrue(d["valid_hid_framing"])
+        self.assertEqual(d["csw_status_name"], "good")
+
+    def test_synthetic_capture_hid_idle_for_wormhole(self):
+        pcap = wp.read_pcap(self.SYNTH)
+        summary = wp.summarise(pcap)
+        # Logitech traffic exists, but Wormhole inbound HID stays idle
+        # on single-host injection (peer replay needs a real session).
+        self.assertEqual(summary["devices"]["3:15"]["hid_reports"], 0)
+
+
+class TestVendorHidCdb(unittest.TestCase):
+    def test_decode_vendor_hid_mouse(self):
+        # D9 '3' + 12-byte payload + 'OT' -- the mouse HID packet.
+        cdb = bytes([0xD9, 0x33]) + bytes.fromhex("0123456789abcdef01234567") + b"OT"
+        out = wp.decode_cdb(cdb)
+        self.assertEqual(out["name"], "WORMHOLE VENDOR HID (0xD9)")
+        self.assertEqual(out["opcode"], "0xD9")
+        self.assertTrue(out["is_vendor"])
+        self.assertTrue(out["is_vendor_hid"])
+        self.assertEqual(out["hid_type"], "mouse")
+        self.assertEqual(out["type_char"], "3")
+        self.assertEqual(out["payload_hex"], "0123456789abcdef01234567")
+        self.assertEqual(out["payload"], list(bytes.fromhex("0123456789abcdef01234567")))
+        self.assertEqual(out["footer_hex"], "4f54")
+        self.assertEqual(out["footer_ascii"], "OT")
+        self.assertTrue(out["footer_ok"])
+        self.assertTrue(out["valid_hid_framing"])
+        self.assertEqual(out["cdb_len"], 16)
+
+    def test_decode_vendor_hid_keyboard_and_multimedia(self):
+        for char, name in ((0x34, "keyboard"), (0x36, "multimedia")):
+            cdb = bytes([0xD9, char]) + bytes(12) + b"OT"
+            out = wp.decode_vendor_cdb(cdb)
+            self.assertEqual(out["hid_type"], name)
+            self.assertTrue(out["valid_hid_framing"])
+
+    def test_decode_vendor_hid_bad_footer(self):
+        cdb = bytes([0xD9, 0x33]) + bytes(12) + b"XX"
+        out = wp.decode_vendor_cdb(cdb)
+        self.assertEqual(out["footer_ok"], False)
+        self.assertEqual(out["valid_hid_framing"], False)
+
+    def test_decode_vendor_hid_unknown_type(self):
+        cdb = bytes([0xD9, 0x39]) + bytes(12) + b"OT"  # '9'
+        out = wp.decode_vendor_cdb(cdb)
+        self.assertEqual(out["hid_type"], "unknown")
+        self.assertEqual(out["valid_hid_framing"], False)
+
+    def test_decode_generic_vendor_upipe_candidate(self):
+        # Non-D9 vendor opcode with a data phase -- possible UPipe.
+        cdb = bytes([0xC2, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 1, 0, 0])
+        out = wp.decode_cdb(cdb)
+        self.assertTrue(out["is_vendor"])
+        self.assertFalse(out["is_vendor_hid"])
+        self.assertTrue(out["candidate_upipe"])
+        self.assertIn("UPipe", out["name"])
+
+    def test_decode_vendor_non_vendor_is_empty(self):
+        self.assertEqual(wp.decode_vendor_cdb(bytes.fromhex("120000002400")), {})
+        self.assertEqual(wp.decode_vendor_cdb(b""), {})
+
+    def test_build_vendor_hid_cdb_roundtrip(self):
+        payload = bytes.fromhex("00112233445566778899aabb")
+        cdb = wp.build_vendor_hid_cdb("4", payload)
+        self.assertEqual(len(cdb), 16)
+        self.assertEqual(cdb[0], 0xD9)
+        self.assertEqual(cdb[1], 0x34)
+        self.assertEqual(cdb[2:14], payload)
+        self.assertEqual(cdb[14:16], b"OT")
+        out = wp.decode_cdb(cdb)
+        self.assertEqual(out["payload_hex"], payload.hex())
+
+    def test_build_vendor_hid_cdb_pads_short_payload(self):
+        cdb = wp.build_vendor_hid_cdb("3", bytes([0x01]))
+        self.assertEqual(cdb[2], 0x01)
+        self.assertEqual(cdb[3:14], bytes(11))
+
+    def test_build_vendor_hid_cdb_rejects_bad_type(self):
+        with self.assertRaises(ValueError):
+            wp.build_vendor_hid_cdb("9", b"")
+
+    def test_transaction_vendor_flags(self):
+        cbw = wp.CbW(tag=0x301, data_len=0, flags=0, lun=0,
+                     cdb=wp.build_vendor_hid_cdb("3", bytes(12)),
+                     frame=1, ts=0.0)
+        txn = wp.Transaction(bus=3, dev=15, cbw=cbw)
+        self.assertTrue(txn.is_vendor)
+        self.assertTrue(txn.is_vendor_hid)
+        self.assertEqual(txn.opcode_name, "WORMHOLE VENDOR HID (0xD9)")
+
+
+class TestHidReports(unittest.TestCase):
+    def test_decode_mouse_report(self):
+        # Buttons 0x01 (left), X=+10, Y=-5, Wheel=0
+        payload = bytes([0x01, 10, 251, 0])
+        out = wp.decode_hid_mouse_report(payload)
+        self.assertTrue(out["decoded"])
+        self.assertEqual(out["kind"], "mouse")
+        self.assertEqual(out["buttons"], 0x01)
+        self.assertTrue(out["left"])
+        self.assertFalse(out["right"])
+        self.assertEqual(out["x"], 10)
+        self.assertEqual(out["y"], -5)
+        self.assertEqual(out["wheel"], 0)
+
+    def test_decode_mouse_report_signed_and_buttons(self):
+        payload = bytes([0x07, 0x7F, 0x80, 0xFF])  # all buttons, X=+127 Y=-128 wheel=-1
+        out = wp.decode_hid_mouse_report(payload)
+        self.assertTrue(out["left"] and out["right"] and out["middle"])
+        self.assertEqual(out["x"], 127)
+        self.assertEqual(out["y"], -128)
+        self.assertEqual(out["wheel"], -1)
+
+    def test_decode_mouse_report_short(self):
+        out = wp.decode_hid_mouse_report(bytes([0x00, 0x00]))
+        self.assertFalse(out["decoded"])
+        self.assertIn("error", out)
+
+    def test_decode_keyboard_report(self):
+        # Modifier LShift (0x02), constant 0, keys 0x04 (A) 0x05 (B)
+        payload = bytes([0x02, 0x00, 0x04, 0x05, 0, 0, 0, 0])
+        out = wp.decode_hid_keyboard_report(payload)
+        self.assertTrue(out["decoded"])
+        self.assertEqual(out["kind"], "keyboard")
+        self.assertEqual(out["modifiers"], 0x02)
+        self.assertEqual(out["modifier_names"], ["LShift"])
+        self.assertEqual(out["keys"], [0x04, 0x05])
+        self.assertEqual(out["key_hex"], ["0x4", "0x5"])
+        self.assertFalse(out["idle"])
+
+    def test_decode_keyboard_idle(self):
+        payload = bytes(8)
+        out = wp.decode_hid_keyboard_report(payload)
+        self.assertTrue(out["idle"])
+        self.assertEqual(out["keys"], [])
+
+    def test_decode_hid_report_dispatch(self):
+        mouse = wp.decode_hid_report(3, bytes([0, 1, 2, 3]))
+        kbd = wp.decode_hid_report(4, bytes(8))
+        unknown = wp.decode_hid_report(9, bytes(4))
+        self.assertEqual(mouse["kind"], "mouse")
+        self.assertEqual(kbd["kind"], "keyboard")
+        self.assertFalse(unknown["decoded"])
+
+    def test_parse_hid_reports_filters(self):
+        # Only xfer==1, kind=='C', IN direction counts.
+        def pkt(kind, xfer, ep, payload, frame=1):
+            return wp.UrbPacket(
+                frame=frame, ts=1000.0 + frame, urb_id=frame, kind=kind,
+                xfer=xfer, endpoint=ep, dev=15, bus=3,
+                flag_setup=0, flag_data=0, status=0, length=len(payload),
+                data_len=len(payload), setup=None, interval=0,
+                transfer_flags=0, payload=payload)
+
+        packets = [
+            pkt("S", 1, 0x83, bytes(4), 1),      # submit -- ignore
+            pkt("C", 1, 0x83, bytes([1, 10, 0, 0]), 2),  # mouse report
+            pkt("C", 1, 0x84, bytes([0, 0, 4, 0, 0, 0, 0, 0]), 3),  # kbd
+            pkt("C", 3, 0x81, b"USBC", 4),       # bulk -- ignore
+            pkt("C", 1, 0x04, bytes(8), 5),      # OUT -- ignore
+        ]
+        reports = wp.parse_hid_reports(packets)
+        self.assertEqual(len(reports), 2)
+        self.assertEqual(reports[0]["kind"], "mouse")
+        self.assertEqual(reports[1]["kind"], "keyboard")
+
+    def test_idle_capture_has_zero_hid_and_zero_vendor(self):
+        pcap = wp.read_pcap(PCAP)
+        summary = wp.summarise(pcap)
+        info = summary["devices"]["3:15"]
+        # Total HID reports are non-zero (Logitech 3:7 floods the bus),
+        # but the Wormhole device itself must have 0 reports / 0 vendor HID.
+        self.assertGreater(summary["total_hid_reports"], 0)
+        self.assertEqual(info["hid_reports"], 0)
+        self.assertEqual(info["vendor_hid_packets"], 0)
+        self.assertEqual(info["vendor_cdb_packets"], 0)
+        self.assertEqual(info["candidate_upipe_packets"], 0)
+
+    def test_synthetic_peer_active_summary(self):
+        # Build a minimal pcap-like packet list with a vendor HID CBW
+        # transaction and an inbound mouse report, then summarise.
+        import io
+        # Construct usbmon headers manually is heavy; instead test the
+        # transaction + HID integration via parse functions directly.
+        cbw_payload = b"USBC" + struct.pack("<II", 0x999, 0) + bytes([0, 0, 16]) + wp.build_vendor_hid_cdb("3", bytes(12))
+        cbw_payload = cbw_payload.ljust(31, b"\x00")
+        cbw = wp.parse_cbw(cbw_payload)
+        assert cbw is not None
+        txn = wp.Transaction(bus=3, dev=15, cbw=cbw,
+                             csw=wp.CsW(tag=0x999, residue=0, status=0, frame=2, ts=1.0))
+        d = wp.transaction_to_dict(txn, 0.0)
+        self.assertTrue(d["is_vendor_hid"])
+        self.assertEqual(d["hid_type"], "mouse")
+        self.assertEqual(d["vendor_hid_type"], "mouse")
 
 
 if __name__ == "__main__":

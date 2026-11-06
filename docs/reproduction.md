@@ -105,12 +105,93 @@ sudo apt install upx-u
 # Verify: rea doctor --provider ghidra  # healthy, version 12.1.4
 ```
 
-## 6. Second-machine bridge test
+## 6. Second-machine bridge test (live peer-active capture)
 
-Plug the other end into a second PC, leave both ends connected, then:
+Plug the other end into a second PC, leave both ends connected.  The local
+enumeration is identical whether or not the peer is connected — the
+peer link is internal to the cable — so a capture only shows *effects*
+(host → cable vendor CDBs, cable → host HID reports).  The peer
+microcontroller's forwarding itself is not visible from one host.
 
-1. Without running Wormhole software on either side: re-capture 30 s of idle usbmon — expect only kernel LOG SENSE / REQUEST SENSE pairs, 0 HID interrupts (as in `docs/capture-log.md`).
-2. Run Wormhole/GoBridge on both sides (per ISO), move the mouse or drag a file, and capture again.
-3. Compare: HID interrupt completions on the local `event*` device and Bulk/CSW/file-transfer traffic that appears only during the session.
+### 6.1 Find the bus
+
+```sh
+lsusb -t                        # note the Wormhole Bus number (e.g. Bus 003)
+sudo tcpdump -D | grep usbmon   # usbmonN matches that Bus
+# this repo's sample is Bus 3 (usbmon3); use your own N below
+```
+
+### 6.2 Idle baseline (no Wormhole software on either side)
+
+```sh
+sudo tcpdump -i usbmon3 -w captures/wormhole_bus3_idle_$(date +%F).pcap &
+sleep 30
+sudo pkill tcpdump
+python3 tools/wormhole_parse.py captures/wormhole_bus3_idle_*.pcap
+# expect: only kernel LOG SENSE / REQUEST SENSE pairs, 0 vendor HID (0xD9),
+# 0 Wormhole HID reports — as in docs/capture-log.md
+```
+
+### 6.3 Peer-active session (GoBridge/Wormhole on both ends)
+
+1. On each machine, install and run the software from the ISO
+   (`Wormhole.app` → `WormholeShell` extracts `Wormhole.tgz` to
+   `~/Library`; see `docs/iso-payload.md`).  On macOS `GoBridgeDemon`
+   needs Accessibility permission for the CGEvent taps.
+2. On the capturing host, start the capture **before** switching:
+
+```sh
+sudo tcpdump -i usbmon3 -w captures/wormhole_bus3_live_$(date +%F).pcap &
+```
+
+3. Switch to the peer (hotkey or cross the screen edge), then in
+   sequence while the capture is running:
+   - move the mouse in a pattern (relative moves)
+   - click / scroll
+   - type a short string on the keyboard
+   - drag a small file between machines (or copy a clipboard item)
+   - switch back to local
+4. Stop the capture and parse:
+
+```sh
+sudo pkill tcpdump
+capinfos captures/wormhole_bus3_live_*.pcap
+python3 tools/wormhole_parse.py captures/wormhole_bus3_live_*.pcap --hid
+python3 tools/wormhole_parse.py captures/wormhole_bus3_live_*.pcap --json | less
+```
+
+### 6.4 What to look for
+
+| Signal | Where | Meaning |
+|---|---|---|
+| Bulk CBW with CDB opcode `0xD9`, byte 1 `3/4/6`, footer `OT` | Bulk-Only transactions, `vendorHID` column | Host → cable HID packet (`OTi_SendHIDPacket`). Parser decodes type/payload in the `vendorHID` tail. |
+| Bulk CBW with any other vendor opcode (`0xC0`–`0xFF`) + data phase | `candidateUPipe` flag | Possible UPipe / file / clipboard packet — magic unknown; capture the raw hex. |
+| Interrupt IN on EP3 (mouse) / EP4 (keyboard) for the Wormhole `Bus:Dev` | `HID interrupt reports` section | Cable → host replay of the peer's input. EP3: 4-byte mouse (buttons/X/Y/wheel); EP4: 8-byte keyboard (modifiers + 6 keys). |
+| Only `LOG SENSE`/`REQUEST SENSE` pairs, zero of the above | Same sections empty | No session was driven — check that GoBridge is running on both ends and the switch hotkey matched. |
+
+### 6.5 Injecting a test packet (single-host, no GoBridge)
+
+You can verify the wire path and the parser without a session by
+sending a synthetic `0xD9` CDB with `sg_raw` while capturing.  This
+exercises the cable's marker handling; it does not prove peer
+forwarding (that needs both ends).  Build the CDB with the parser's
+helper so the framing is guaranteed correct:
+
+```sh
+python3 - <<'PY'
+import sys; sys.path.insert(0, "tools")
+import wormhole_parse as wp
+cdb = wp.build_vendor_hid_cdb("3", bytes([0x01, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
+open("/tmp/wormhole_d9.cdb", "wb").write(cdb)
+print(cdb.hex())
+PY
+sudo tcpdump -i usbmon3 -w captures/wormhole_bus3_synth_$(date +%F).pcap &
+# /dev/sgX is the Wormhole's SCSI generic device (see §2):
+sudo sg_raw --cmd-file /tmp/wormhole_d9.cdb /dev/sgX
+sudo pkill tcpdump
+python3 tools/wormhole_parse.py captures/wormhole_bus3_synth_*.pcap --hid
+# expect: one extra CBW in the transaction list with
+#   name=WORMHOLE VENDOR HID (0xD9), hid_type=mouse, footer_ok=True
+```
 
 Record what you see when you do this — the peer-to-peer data channel is internal, so local capture can only show its HID/SCSI *effects*.

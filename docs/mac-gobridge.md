@@ -313,7 +313,9 @@ check) to trigger file-transfer sessions.
 
 - File/clipboard **UPipe** packet magic and framing beyond the HID `D9`
   format — needs a live peer-active usbmon capture (see
-  `docs/reproduction.md` §6). `tools/wormhole_parse.py` will need a
-  vendor-CDB decoder for it.
+  `docs/reproduction.md` §6).  `tools/wormhole_parse.py` now decodes
+  `0xD9` HID packets (`decode_vendor_cdb`) and flags any other
+  `0xC0`–`0xFF` CDB as a `candidate_upipe` with raw hex, so the next
+  live capture can characterise the UPipe magic without a new parser.
 - Cable-side forwarding (how the microcontroller routes CDB packets to
   the peer end) is not in host binaries; needs firmware or two-end capture.

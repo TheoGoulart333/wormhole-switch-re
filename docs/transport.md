@@ -149,6 +149,36 @@ This only appears on the wire when Wormhole/GoBridge software is
 actively transferring — the idle capture in `docs/capture-log.md`
 shows only kernel CDBs, which is consistent.
 
+### Parser support (`tools/wormhole_parse.py`)
+
+The parser decodes both directions (verify with the live-capture
+runbook in `docs/reproduction.md` §6):
+
+- **Host → cable (bulk):** any bulk CBW whose CDB starts with `0xD9`
+  is reported as `WORMHOLE VENDOR HID (0xD9)` with `hid_type`
+  (`mouse`/`keyboard`/`multimedia`), the 12-byte `payload_hex`
+  (bytes 2–13), `footer_hex`/`footer_ok` (`OT`), and
+  `valid_hid_framing`.  Summary counts are in `vendor_hid_packets` /
+  `vendor_hid_types` per device and `total_vendor_hid_packets`
+  overall.  Non-`0xD9` CDBs in the SPC vendor range (`0xC0`–`0xFF`)
+  are flagged `candidate_upipe` with raw hex so a UPipe / file /
+  clipboard packet can be characterised from a live capture.
+- **Cable → host (interrupt):** interrupt IN COMPLETEs on EP3 are
+  decoded as boot-mouse reports (byte 0 buttons, bytes 1–3 signed
+  X/Y/wheel) and EP4 as boot-keyboard reports (byte 0 modifiers,
+  byte 1 constant, bytes 2–7 USB HID key codes).  `parse_hid_reports()`
+  returns decoded dicts; the CLI prints a `HID interrupt reports`
+  section (use `--hid` for a longer list).
+
+Verify the idle sample still shows zeros:
+
+```sh
+python3 tools/wormhole_parse.py captures/wormhole_bus3_2026-11-06.pcap
+# Vendor HID (0xD9) packets: 0  candidate UPipe: 0  HID reports: 841
+# 3:15 row: ... 42  0  0  <-- WormholeSwitch
+python3 -m unittest tools.test_wormhole_parse   # 42 tests incl. vendor/HID
+```
+
 ## Bus neighbours on this host (for topology context)
 
 VyVPN router / VIA hub neighbours changed between plugs; at the second enumeration Bus 3 held:

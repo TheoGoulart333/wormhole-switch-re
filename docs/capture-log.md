@@ -108,7 +108,52 @@ CSW per device (42 Wormhole transactions: LOG SENSE 16, REQUEST SENSE
 16, TEST UNIT READY 4, INQUIRY 2, READ CAPACITY(10) 1, READ
 TOC/PMA/ATIP 2, GET CONFIGURATION 1), and confirms 0 interrupt
 packets for 3:15 (all 1682 interrupt packets are Logitech 3:7).
+It also decodes the Wormhole vendor HID protocol (`0xD9` CDBs) and
+boot HID reports — in this idle capture both counts are zero for
+`3:15` (`vendor_hid_packets=0`, `hid_reports=0`; the 841 total HID
+reports are Logitech).
 Note the on-disk pcap linktype is 220; Wireshark displays the same
-encapsulation as 115 (usb-linux-mmap).
+encapsulation as 115 (usb-linux-mmap).  See `docs/reproduction.md`
+§6 for the peer-active capture procedure this parser is built for.
 
 File retained in this repo under `captures/` (195 kB, under GitHub's 100 MB limit).
+
+## Synthetic vendor-CDB injection (verified 2026-11-06)
+
+To prove the new `0xD9` decoder works on real wire traffic without a
+peer session, a 16-byte CDB was injected with `sg_raw` while capturing
+`usbmon3` (see `docs/reproduction.md` §6.5):
+
+```sh
+python3 - <<'PY'
+import sys; sys.path.insert(0, "tools")
+import wormhole_parse as wp
+cdb = wp.build_vendor_hid_cdb("3", bytes([0x01, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
+open("/tmp/wormhole_d9.cdb", "wb").write(cdb)
+print(cdb.hex())   # d933010a000000000000000000004f54
+PY
+sg_raw -v /dev/sg2 d9 33 01 0a 00 00 00 00 00 00 00 00 00 00 4f 54
+# SCSI Status: Good
+```
+
+Result (`captures/wormhole_bus3_synth_2026-11-06.pcap`, 140 packets,
+1.88 s, SHA-256 `f4695062311606e8970127a66531bdc063522d04b8f96aa258f0d02fe294c355`,
+plus `wormhole_bus3_synth_capinfos.txt`):
+
+```
+Vendor HID (0xD9) packets: 1  candidate UPipe: 0  HID reports: 32
+3:15 row: ... 3  1  0  <-- WormholeSwitch
+  f61  WORMHOLE VENDOR HID (0xD9)  CDB=d933010a000000000000000000004f54
+      dir=OUT len=0  CSW=good
+      vendorHID type=mouse payload=010a00000000000000000000
+      footer_ok=True framing=True
+  (next two transactions are the usual LOG SENSE / REQUEST SENSE pair)
+HID interrupt reports (0 in focus): interfaces idle
+```
+
+Key observations: the firmware returns **Good** (not CHECK CONDITION)
+for the `0xD9` CDB, confirming it is a recognised vendor opcode, and
+the parser's `build_vendor_hid_cdb` helper produces byte-identical
+framing.  No inbound HID reports appear for `3:15` — a single-host
+injection does not synthesise the peer's input replay, which still
+requires a two-machine GoBridge session.
