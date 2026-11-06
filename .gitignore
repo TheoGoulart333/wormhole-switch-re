@@ -1,0 +1,39 @@
+# Firmware / host binaries from the ISO — copyrighted, do not commit
+*.exe
+*.dll
+*.dylib
+*.tgz
+*.zz
+*.lst
+GSDD.*
+SKLoader*
+embedded_DLL*
+Wormhole.app/
+WormholeShell
+GoBridgeDemon
+*.iso
+*.cdr
+WORMHOLE/
+
+# Generated REA / analysis artefacts (keep hashes in docs instead)
+*.idb
+*.i64
+*.analysis
+snapshot*.json
+
+# Large capture policy: pcaps are welcome if < 10 MB and sanitized;
+# ignore raw scratch dumps
+*.tmp
+*.dump
+link/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
+
+# Keep the one sanitized capture in this repo
+!captures/*.pcap
+!captures/*.txt
