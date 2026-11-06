@@ -204,12 +204,116 @@ use the same `SendSCSICommand*` plumbing with a data phase
 (`CFData` at `+0x2c`); their packet magic still needs a live
 capture to confirm.
 
+## KMKeyMouse.dylib — the event engine (`handleCarbonEvent`)
+
+```
+KMKeyMouse.dylib  253b1acc2396a814dce846febfca167659291b088241f82e703554c228724f57
+                  mach-o-universal i386+ppc, 134K, 170 procedures, 835 strings
+```
+`binary_overview` → `ev_88dd9f7f703476ba79f2be17a54d69d32d019ffb7cc6a854e52df38484b9ceb5`
+
+Classes: `KMMainLoop` (sending side), `KMHandler` (ObjC delegate),
+`CKMEvent` (C++ engine), `MouseInterface` (speeds), `IUPipeCmd` /
+`GenericUPipeCmd` (peer command serialization).
+
+- `-[KMHandler handleCarbonEvent:withEvent:]` (0x1e9e) is a 4-line
+  trampoline: `if (this) return CKMEvent::KMEventHandler(this, type, event); return 0;`
+  (pseudocode → `ev_d1193cbf8f82bb56217d0662bec3ef97962bcd9f6f2448a9b44af2547598a81a`,
+  analyze parent `ev_600fd079631d2dfe9ec4f87a3e65dd27dd7fafdb763c165a8252966b886ece87`).
+  This is the `KMLink` delegate `THMFileManager.handleSystemEvent` forwards to.
+- `CKMEvent::KMEventHandler` (0x6ed8, pseudocode →
+  `ev_4b7c0a08e480a44908cc256d482904679458f87566dc657d0f53831316e84055`,
+  analyze parent `ev_ab2cd5fa8963bf8bc3f25133a7c0aa6bc5c8763e69a259f7436e77ce5583c90e`)
+  dispatches on `CGEventGetType`:
+  - `1/3` (mouse down) → `OnMouseDown`; `2/4` (mouse up) → `OnMouseUp`
+    (special return `3` on the already-handled path);
+    `5/6/7` (move/drag) → `OnMouseMove`; `22` (scroll wheel) →
+    `OnMouseWheelMoved`.
+  - `10/11` (key down/up): reads keycode field 9; if a remote session is
+    active (`this+0x50`) and keycode+modifiers match the configured hotkey
+    (`this+0x44` / `this+0x48` vs `this+0x40`), logs
+    `Matched hotkey defined with keydown/keyup, pass to local` and returns
+    `3` (switch back to local). Otherwise `OnKey`.
+  - `12` (flags changed): tracks Cmd `0x100` / Shift `0x200` / Ctrl `0x1000` /
+    Alt `0x800` into modifier state, logs `QuartzKeyModifier %x`; if remote,
+    `OnKey` then return `3`.
+  - `14` (system-defined, subtype 8 = multimedia): maps `data1>>16` to HID
+    usages — SoundUp `0x80`, SoundDown `0x81`, BrightnessUp `0x48`,
+    BrightnessDown `0x47`, Power `0x66`, Mute `0x7f` →
+    `SendKeyboardEvent(14-byte buffer, usage at byte 2)`;
+    Eject `0xb8`, Play `0xcd`, Next `0xb5`, Prev `0xb6`, Fast `0xb3`,
+    Rewind `0xb4` → `SendMultimediaKeyEvent(this, 2, usage, 0)`.
+    Help/Contrast/LaunchPanel/Mirror are logged only.
+  - Default → log `Unknown km event %d`.
+  - Returns `this+0x50` (remote-active) on most paths — the status the
+    GoBridge mouse callback interprets.
+- Sending side: `CKMEvent::SendMouseEvent` (0x3cd8, 5,050 code units —
+  relative-move encoding, boundary detection `BoundaryDetectionInVirtualFrame` /
+  `BoundaryDetectionInMainFrame`, speed via `MouseInterface`),
+  `SendKeyboardEvent` (0x3bd8, pseudocode →
+  `ev_109b330c756f6bddf777a35ed9e481cdd18fb0e549f44ad995acc986384788de`):
+  gated on `isRemoteDevOn` and (`isConnected` or 15 s since last send at
+  `this+0xc0`), then `[KMMainLoop sendKeyData:packet]` →
+  `KMMainLoop sendMouseData:` / `sendMultimediaKeyData:` →
+  delegate `post*HIDEventToRemote` (GoBridgeDemon) → `OTi_SendHIDPacket`.
+- Switching: `SwitchToRemote` / `SwitchFromRemote`,
+  `ProcessSwitchToRemoteCmd` / `ProcessSwitchToLocalCmd`,
+  `SendSwitchToRemoteCmd`, `HotKeySwitchBack`, `secondcheckswitch`,
+  `DetectSwitch`, `OnHotKey` + Carbon `RegisterEventHotKey`.
+  Replay side: `CGEventCreateMouseEvent` / `CGEventPost`,
+  `CGWarpMouseCursorPosition`, `CGSetLocalEventsSuppressionInterval`,
+  `EmulateLeftMouseButtonDown/Up`, `warpMouse`, `CenterMouse`.
+- `KMMainLoop` C API: `startKMKeyMouse` / `stopKMKeyMouse`,
+  `setKeyMouse` / `getKeyMouse`, threading via
+  `startCheckKeyMouseThreading` / `checkKeyMouseThread`.
+
+## KMClipboard.dylib — clipboard format conversion
+
+```
+KMClipboard.dylib  d3e038f4b5c81228f599e889bc23e5c417df7c4484a473e77222b0443d12f00b
+                  mach-o-universal i386+ppc, 390K, 638 procedures, 2652 strings
+```
+`binary_overview` → `ev_9e57b90d50d5161988ff5d450af4be59699c183a906d8e50a998a0cd87ff06f3`
+
+- `IClipboard` marshalling: `marshall` / `unmarshall`,
+  `marshallFromUPipeMsg` / `unmarshallFromUPipeMsg`, `copy`
+  (×2 overloads), `readUInt32` / `writeUInt32`, `get` / `has` /
+  `open` / `close` / `add` / `empty`.
+- `COSXClipboard` holds a `vector<IOSXClipboardConverter*>`; converters
+  (`getPasteboardData` / `fromIClipboard` / `toIClipboard` /
+  `handleUPipeClipboardData`):
+  `AnyText` (hexdecimal-string encode/decode, Unix↔MacOS linefeeds),
+  `Text`, `UTF16`, `File`, Apple (`HTML`, `PDF`, `PICT`, `RTFD`, `RTF`,
+  `TIFF`), Windows (`RTF`, `HTML`, `PPT`, `DIB`, `MultiImage`).
+- Pasteboard access via the legacy Carbon API:
+  `PasteboardCreate`, `PasteboardPutItemFlavor`,
+  `PasteboardCopyItemFlavorData`, `PasteboardGetItemFlavorFlags`,
+  `PasteboardGetItemIdentifier`, `PasteboardClear`,
+  `PasteboardSynchronize`.
+- Clipboard payloads ride **UPipe messages** (`marshallFromUPipeMsg`),
+  i.e. the same peer channel as file commands — not HID packets.
+  Wire framing of UPipe clipboard messages is still unknown (needs a
+  live capture; see Unknowns).
+
+## FileChgEvent.dylib — Finder paste monitor
+
+```
+FileChgEvent.dylib  ed5346712d8d708e781566e198608ae0f22d1460bcfbc0d5852054868f48c54d
+                   mach-o-universal i386+ppc, 43K, 51 procedures, 138 strings
+```
+`binary_overview` → `ev_9bc7c91e11f8f8e1f340d684c8c518b3ad9507a35a4e48fdf1d8f572d7fb0630`
+
+Single class `MonitorPasteFileInFinder` (search → `ev_cc41dc1678a0d04fa0ae2d228e253fd441fca2f1ce0ac4b222753d88f4182932`):
+`startMonitorPasteFileInFinderThreading`, `checkCreateFileInFinderThread`,
+`checkIfTheDummyWithContent:`, `GetDelagate` / `init` / `dealloc`.
+Detects files pasted/dropped in Finder (including a dummy-file content
+check) to trigger file-transfer sessions.
+
 ## Unknowns (narrowed)
 
-- File/clipboard packet magic and framing beyond the HID `D9` format —
-  needs a live peer-active usbmon capture (see `docs/reproduction.md` §6).
-  `tools/wormhole_parse.py` will need a vendor-CDB decoder for it.
-- `handleCarbonEvent:withEvent:` lives in `KMKeyMouse.dylib`
-  (`KMLink` delegate) — not analyzed yet.
+- File/clipboard **UPipe** packet magic and framing beyond the HID `D9`
+  format — needs a live peer-active usbmon capture (see
+  `docs/reproduction.md` §6). `tools/wormhole_parse.py` will need a
+  vendor-CDB decoder for it.
 - Cable-side forwarding (how the microcontroller routes CDB packets to
   the peer end) is not in host binaries; needs firmware or two-end capture.
