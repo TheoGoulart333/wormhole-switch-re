@@ -51,7 +51,9 @@ See [`docs/capture-log.md`](docs/capture-log.md) for a sample usbmon capture and
 ├── captures/
 │   ├── wormhole_bus3_2026-11-06.pcap
 │   └── wormhole_bus3_capinfos.txt
-└── tools/                        # (planned) small parsing scripts
+└── tools/
+    ├── wormhole_parse.py         # stdlib-only usbmon pcap parser (CBW/CSW/SCSI)
+    └── test_wormhole_parse.py    # unittest suite for the parser
 ```
 
 ## Reproduce the basics
@@ -67,6 +69,19 @@ sudo tcpdump -i usbmon3 -w wormhole.pcap   # Bus 3 = wormhole bus on this host; 
 ```
 
 See `docs/reproduction.md` for endpoints, `/sys` paths, and REA commands.
+
+## Parse a capture
+
+`tools/wormhole_parse.py` is stdlib-only (no tshark/pyshark/scapy) and
+reproduces the counts in `docs/capture-log.md` from the committed pcap.
+It discovers the Wormhole by VID:PID during control enumeration, so it
+does not depend on a Bus:Device number from a previous plug:
+
+```sh
+python3 tools/wormhole_parse.py captures/wormhole_bus3_2026-11-06.pcap
+python3 tools/wormhole_parse.py captures/wormhole_bus3_2026-11-06.pcap --json
+python3 -m unittest tools.test_wormhole_parse
+```
 
 ## Tooling notes (this host)
 
