@@ -1,0 +1,26 @@
+File name:           captures/wormhole_bus3_rerun_2026-11-06.pcap
+File type:           Wireshark/tcpdump/... - pcap
+File encapsulation:  USB packets with Linux header and padding
+File timestamp precision:  microseconds (6)
+Packet size limit:   file hdr: 245824 bytes
+Number of packets:   342
+File size:           30 kB
+Data size:           25 kB
+Capture duration:    50.883106 seconds
+Earliest packet time: 2026-11-06 18:47:50.032678
+Latest packet time:   2026-11-06 18:48:40.915784
+Data byte rate:      491 bytes/s
+Data bit rate:       3,933 bits/s
+Average packet size: 73.16 bytes
+Average packet rate: 6 packets/s
+SHA256:              78547ebd2ae4862e375eeabe13090d7e3c2f9c4923c3d1270338dbcbb7c24c87
+SHA1:                6c686931c9ad2dc787fa22eedc99381a457870c0
+Strict time order:   True
+Number of interfaces in file: 1
+Interface #0 info:
+                     Encapsulation = USB packets with Linux header and padding (115 - usb-linux-mmap)
+                     Capture length = 245824
+                     Time precision = microseconds (6)
+                     Time ticks per second = 1000000
+                     Number of stat entries = 0
+                     Number of packets = 342

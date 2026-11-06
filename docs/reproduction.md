@@ -113,6 +113,22 @@ peer link is internal to the cable — so a capture only shows *effects*
 (host → cable vendor CDBs, cable → host HID reports).  The peer
 microcontroller's forwarding itself is not visible from one host.
 
+### 6.0 Where captures go
+
+`tcpdump -i usbmon<N>` records every device on that bus, not just the Wormhole
+(keyboards, mice, other storage).  Keep raw captures out of the repo and
+publish only a copy filtered to the Wormhole:
+
+```sh
+mkdir -p ~/wormhole-private/raw-captures
+lsusb -d 0711:2211                 # Bus:Dev changes on re-enumeration; use the current one
+python3 tools/wormhole_parse.py RAW.pcap --all --no-transactions   # check the device table
+python3 tools/filter_usbmon.py RAW.pcap --device 3:15 -o captures/OUT.pcap   # 3:15 = Bus:Dev from lsusb
+```
+
+Filter whenever the device table lists anything besides the Wormhole and its
+root hub.  `docs/live-capture-2026-11-06.md` has the 2026-11-06 check.
+
 ### 6.1 Find the bus
 
 ```sh
@@ -124,9 +140,11 @@ sudo tcpdump -D | grep usbmon   # usbmonN matches that Bus
 ### 6.2 Idle baseline (no Wormhole software on either side)
 
 ```sh
-sudo tcpdump -i usbmon3 -w captures/wormhole_bus3_idle_$(date +%F).pcap &
+RAW=~/wormhole-private/raw-captures/wormhole_bus3_idle_$(date +%F).pcap
+sudo tcpdump -i usbmon3 -w "$RAW" &
 sleep 30
 sudo pkill tcpdump
+python3 tools/filter_usbmon.py "$RAW" --device 3:15 -o captures/wormhole_bus3_idle_$(date +%F).pcap
 python3 tools/wormhole_parse.py captures/wormhole_bus3_idle_*.pcap
 # expect: only kernel LOG SENSE / REQUEST SENSE pairs, 0 vendor HID (0xD9),
 # 0 Wormhole HID reports — as in docs/capture-log.md
@@ -141,7 +159,8 @@ python3 tools/wormhole_parse.py captures/wormhole_bus3_idle_*.pcap
 2. On the capturing host, start the capture **before** switching:
 
 ```sh
-sudo tcpdump -i usbmon3 -w captures/wormhole_bus3_live_$(date +%F).pcap &
+RAW=~/wormhole-private/raw-captures/wormhole_bus3_live_$(date +%F).pcap
+sudo tcpdump -i usbmon3 -w "$RAW" &
 ```
 
 3. Switch to the peer (hotkey or cross the screen edge), then in
@@ -155,6 +174,7 @@ sudo tcpdump -i usbmon3 -w captures/wormhole_bus3_live_$(date +%F).pcap &
 
 ```sh
 sudo pkill tcpdump
+python3 tools/filter_usbmon.py "$RAW" --device 3:15 -o captures/wormhole_bus3_live_$(date +%F).pcap
 capinfos captures/wormhole_bus3_live_*.pcap
 python3 tools/wormhole_parse.py captures/wormhole_bus3_live_*.pcap --hid
 python3 tools/wormhole_parse.py captures/wormhole_bus3_live_*.pcap --json | less
@@ -178,20 +198,20 @@ forwarding (that needs both ends).  Build the CDB with the parser's
 helper so the framing is guaranteed correct:
 
 ```sh
-python3 - <<'PY'
-import sys; sys.path.insert(0, "tools")
-import wormhole_parse as wp
-cdb = wp.build_vendor_hid_cdb("3", bytes([0x01, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
-open("/tmp/wormhole_d9.cdb", "wb").write(cdb)
-print(cdb.hex())
-PY
-sudo tcpdump -i usbmon3 -w captures/wormhole_bus3_synth_$(date +%F).pcap &
-# /dev/sgX is the Wormhole's SCSI generic device (see §2):
-sudo sg_raw --cmd-file /tmp/wormhole_d9.cdb /dev/sgX
+RAW=~/wormhole-private/raw-captures/wormhole_bus3_synth_$(date +%F).pcap
+CDB=$(python3 -c 'import sys; sys.path.insert(0, "tools"); import wormhole_parse as wp; print(" ".join("%02x" % b for b in wp.build_vendor_hid_cdb("3", bytes([0x01, 10] + [0] * 10))))')
+echo "$CDB"
+sudo tcpdump -i usbmon3 -w "$RAW" &
+# /dev/sgX is the Wormhole's SCSI generic device (see §2).  Pass the bytes
+# space-separated with -C 1; --cmd-file is not supported in this sg3-utils build.
+sudo sg_raw -C 1 /dev/sgX $CDB
 sudo pkill tcpdump
+python3 tools/filter_usbmon.py "$RAW" --device 3:15 -o captures/wormhole_bus3_synth_$(date +%F).pcap
 python3 tools/wormhole_parse.py captures/wormhole_bus3_synth_*.pcap --hid
 # expect: one extra CBW in the transaction list with
 #   name=WORMHOLE VENDOR HID (0xD9), hid_type=mouse, footer_ok=True
 ```
+
+For a logged, four-phase version of the peer-to-local test (sg_raw and a direct SG_IO call, plus a 15-byte control), see `tools/peer_rerun_send.py`. It needs write access to the `/dev/sgN` node. Results: `docs/live-capture-2026-11-06.md`, re-run section.
 
 Record what you see when you do this — the peer-to-peer data channel is internal, so local capture can only show its HID/SCSI *effects*.
