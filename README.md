@@ -45,6 +45,7 @@ See [`docs/capture-log.md`](docs/capture-log.md) for a sample usbmon capture and
 │   ├── transport.md              # USB descriptors, SCSI, HID identities
 │   ├── iso-payload.md            # ISO contents, manifests, macOS bundle map
 │   ├── pe-analysis.md            # REA PE imports/resources/certs for SKLoader.exe + embedded DLL
+│   ├── mac-gobridge.md           # GoBridgeDemon + OTiTransfer function-level analysis (HID CDB packets)
 │   ├── capture-log.md            # usbmon methodology + CBW/CSW pattern + capacity anomaly
 │   ├── methodology.md            # REA device-protocol workflow used
 │   └── reproduction.md           # commands to re-dump this device yourself

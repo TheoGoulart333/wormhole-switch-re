@@ -200,6 +200,14 @@ String spot-checks:
   VID in strings (any VID check would be a numeric constant, not a
   string — **unknown** without deeper function analysis).
 
+Function-level analysis of GoBridgeDemon (`_main`, CGEvent tap
+callbacks, `THMFileManager_handleSystemEvent`, HID forwarding) and of
+`OTiTransfer.framework` (`OTi_SendHIDPacket`,
+`OTiTransporter::sendHIDPacket`, `SendSCSICommandSendData`,
+`FindAllDevices`) is in [`docs/mac-gobridge.md`](mac-gobridge.md) —
+including the 16-byte vendor-CDB HID packet format
+(`D9 '3'/'4'/'6' <12 payload> O T`) that carries host→cable traffic.
+
 `inspect_macho` remains macOS-only (`unsupported_host`); Mach-O deep
 analysis on Linux goes through `open_binary` + Ghidra, which now works.
 

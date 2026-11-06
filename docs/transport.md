@@ -123,6 +123,32 @@ Read via `/sys/class/hidraw/hidrawX/device/report_descriptor`:
 
 Both HID devices report `Uniq=C6629C6563582530` (same as USB serial) and `Name=j5create WormholeSwitch`.
 
+## Peer link: vendor SCSI CDB packets (host → cable)
+
+Host software does **not** use the boot-HID endpoints to talk to the
+cable. It sends vendor SCSI commands whose **16-byte CDB is the packet**
+(governed by `OTiTransporter::sendHIDPacket` /
+`SendSCSICommandSendData` in `OTiTransfer.framework` — see
+`docs/mac-gobridge.md` for the full decompiler trail):
+
+```
+byte 0    0xD9  (magic)
+byte 1    '3' = mouse (type 1) | '4' = keyboard (type 2) | '6' = multimedia/key (type 3)
+bytes 2–13  12-byte HID payload
+bytes 14–15 'O' 'T'
+```
+
+Sent via `SCSITask` (`ExecuteTaskSync`, 2000 ms timeout); sense
+`(key<<16 | ASC<<8 | ASCQ)` is mapped to OTi result codes.
+The cable microcontroller forwards the packet to the peer end, whose
+host software replays it as a CGEvent (macOS) / HID report (Windows).
+File/clipboard traffic uses the same SCSI plumbing with a data phase;
+its packet magic has not been captured yet.
+
+This only appears on the wire when Wormhole/GoBridge software is
+actively transferring — the idle capture in `docs/capture-log.md`
+shows only kernel CDBs, which is consistent.
+
 ## Bus neighbours on this host (for topology context)
 
 VyVPN router / VIA hub neighbours changed between plugs; at the second enumeration Bus 3 held:
