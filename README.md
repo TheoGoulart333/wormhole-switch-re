@@ -87,8 +87,9 @@ python3 -m unittest tools.test_wormhole_parse
 
 - `reverse-engineer-anything` skill v49, `references/device-protocol-analysis.md` followed (identify transport → capture traffic → reconstruct CBW/CDB → map host binaries).
 - `inspect_pe_imports` / `inspect_pe_resources` / `inspect_pe_certificates` worked (target-free).
-- `open_binary` on `GoBridgeDemon` opened as `mach-o-universal` x86, but deep disassembly blocked: installed **Ghidra 12.2** vs REA requiring **12.1.x (verified 12.1.4)**. Need `ghidra-12.1.4` or REA update.
-- `inspect_pcap_client` blocked: `tshark` binary not on PATH (wireshark 4.4.19 GUI + `capinfos` present). Pcap analysis done via `tcpdump`/`capinfos`/Python parsing. Install `wireshark-common` to enable REA pcap tools.
+- Deep analysis unblocked: Ghidra **12.1.4** installed side-by-side at `/opt/ghidra_12.1.4_PUBLIC` (12.2 untouched), `/usr/local/bin/ghidra` symlink repointed to 12.1.4 so REA 6.8.0 accepts it. `rea doctor --provider ghidra` healthy; SKLoader (988 functions), unpacked OTiArchive DLL (1,849), and GoBridgeDemon (1,204) all decompile. See `docs/pe-analysis.md` *Tooling*.
+- `inspect_pcap_client` now passes: `tshark`/`capinfos` 4.4.19 at `/usr/bin/`. (The repo parser in `tools/` remains stdlib-only and does not need them.)
+- `upx` 4.2.4 (`/usr/bin/upx`) installed — embedded DLL unpacked 104,488 → 310,312 B; real imports (380) and exports (12 `OTI_*`/`ArchiveTree*`) recovered. See `docs/pe-analysis.md`.
 
 ## License
 

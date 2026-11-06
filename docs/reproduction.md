@@ -97,8 +97,12 @@ sudo apt install wireshark-common
 # UPX for embedded DLL
 sudo apt install upx-u
 
-# Ghidra 12.1.x for REA deep analysis (REA verifies 12.1.4)
-# Install to e.g. /opt/ghidra_12.1_PUBLIC and set REA_GHIDRA_HOME / update REA
+# Ghidra 12.1.x for REA deep analysis (REA 6.8.0 verifies 12.1.4)
+# Install side-by-side, e.g. /opt/ghidra_12.1.4_PUBLIC, then point REA at it:
+#   sudo ln -sfn /opt/ghidra_12.1.4_PUBLIC/ghidraRun /usr/local/bin/ghidra
+# (REA discovers Ghidra via the `ghidra` launcher on PATH), or per-invocation:
+#   GHIDRA_INSTALL_DIR=/opt/ghidra_12.1.4_PUBLIC rea doctor --provider ghidra
+# Verify: rea doctor --provider ghidra  # healthy, version 12.1.4
 ```
 
 ## 6. Second-machine bridge test
